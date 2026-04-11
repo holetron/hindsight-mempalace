@@ -63,3 +63,10 @@ TASK.md
 # CHANGELOG.md
 
 blog-post*.github/workflows/
+
+# Session keys
+.sesskey
+*/.sesskey
+
+# Additional virtualenvs
+**/venv/

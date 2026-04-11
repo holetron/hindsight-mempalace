@@ -1,136 +1,178 @@
-# Hindsight MemPalace: Hierarchical Memory for AI Agents
+# Hindsight MemPalace
 
-A fork of [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) that adds the MemPalace hierarchical memory system.
+**Hierarchical memory for AI agents. Storage + taxonomy in one system.**
 
-## What is MemPalace
+A hybrid of two open-source projects:
 
-MemPalace upgrades Hindsight's flat memory bank into a hierarchical system organized by **rooms** (topics like `auth`, `pipeline`, `infrastructure`), **halls** (knowledge types like `decision`, `warning`, `procedure`), **layers** (L0-L3 priority cascade), **closets** (compressed summaries of aging memories), and **tunnels** (cross-bank bridges that connect related knowledge across separate memory banks). The room-by-hall matrix ensures memories are stored and retrieved with structural context rather than relying solely on semantic similarity. In benchmarks, MemPalace achieves **+34% recall accuracy** compared to flat memory retrieval.
+| Project | What it does | What it lacks |
+|---|---|---|
+| [**Hindsight**](https://github.com/vectorize-io/hindsight) by vectorize-io | Long-term vector memory for AI agents. Stores, embeds, recalls. | No structure — all memories in one flat pile |
+| [**MemPalace**](https://github.com/milla-jovovich/mempalace) by milla-jovovich | Hierarchical taxonomy: rooms, halls, layers — the method of loci for AI | No storage engine — a spec without a database |
 
-## Quick Start
+**This fork connects them.** Hindsight's vector store + MemPalace's taxonomy = structured memory with semantic search.
+
+---
+
+## How it works
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    MEMPALACE                          │
+│                                                      │
+│  ┌─── Room: auth ──┐  ┌─── Room: pipeline ──┐       │
+│  │ Hall: facts      │  │ Hall: decisions     │       │
+│  │ Hall: procedures │  │ Hall: events        │       │
+│  │ Hall: warnings   │  │ Hall: facts         │       │
+│  │                  │  │                     │       │
+│  │  L0 ████ always  │  │  L0 ████ always     │       │
+│  │  L1 ███░ warm    │  │  L1 ███░ warm       │       │
+│  │  L2 ██░░ cold    │  │  L2 ██░░ cold       │       │
+│  │  L3 █░░░ archive │  │  L3 █░░░ archive    │       │
+│  └──────────────────┘  └─────────────────────┘       │
+│           │                      │                   │
+│           └──── Tunnel ──────────┘                   │
+│                (cross-bank bridge)                   │
+│                                                      │
+│  Closets: compressed summaries + source pointers     │
+└──────────────────────┬───────────────────────────────┘
+                       │
+              Hindsight vector store
+              (embeddings + semantic search)
+```
+
+**Rooms** — topic isolation. Auth, pipeline, infrastructure, schema — each topic in its own room. An agent searching for auth facts won't wade through 500 deploy memories.
+
+**Halls** — knowledge typing within a room. Fact, event, decision, procedure, warning. The system knows *what* it's looking at before reading — like `Content-Type` for memory.
+
+**Layers L0–L3** — four priority tiers. L0 (core) is always loaded. L3 (archive) is deep-search only. Same idea as CPU cache hierarchy: L1 is fast and small, RAM is slow but holds everything.
+
+**Closets** — AI-compressed summaries with source pointers. Deduplication at the knowledge level: 10 related facts → 1 paragraph + references.
+
+**Tunnels** — cross-bank bridges between agents. Agent A discovers an insight — Agent B sees it through a tunnel without data duplication.
+
+## Comparison
+
+| | [Hindsight](https://github.com/vectorize-io/hindsight) | [MemPalace](https://github.com/milla-jovovich/mempalace) | **This fork** |
+|---|---|---|---|
+| **What it is** | Long-term memory store | Hierarchical taxonomy spec | Storage + taxonomy hybrid |
+| **Storage** | Vector store + embeddings | None (spec only) | Vector store + embeddings |
+| **Memory structure** | Flat (all memories equal) | Rooms → Halls → Layers | Rooms → Halls → Layers + embeddings |
+| **Retrieval** | Semantic search | No retrieval engine | Room-scoped semantic search |
+| **Classification** | None | Defined in spec | Keyword-based, <1ms, zero LLM cost |
+| **Priority tiers** | All memories equal | L0–L3 (spec) | L0–L3 (implemented) |
+| **Compression** | None | Closets (spec) | Closets with source pointers |
+| **Multi-agent** | Shared bank | Tunnels (spec) | Tunnels (cross-bank bridges) |
+| **MCP integration** | API only | None | **5 tools via MCP protocol** |
+| **Setup** | Docker | Manual config | Docker (drop-in upgrade) |
+
+## Quick start
 
 ```bash
-docker compose -f docker-compose.mempalace.yml up
+git clone https://github.com/holetron/hindsight-mempalace.git
+cd hindsight-mempalace
+cp .env.example .env
+# edit .env with your config
+docker compose -f docker-compose.mempalace.yml up -d
 ```
 
-The API will be available at `http://localhost:5100`.
+API available at `http://localhost:5100`. Drop-in replacement for vanilla Hindsight — same API, same clients, new brain.
 
-## Architecture
+## MCP Server
 
-```
-                          MemPalace Structure
- ================================================================
+The `mcp-server/` directory contains a standalone [MCP](https://modelcontextprotocol.io) server. Any MCP-compatible client (Claude Code, OpenClaw, Cursor, etc.) connects and gets structured long-term memory.
 
-  Bank (per-agent)
-   |
-   +-- Room: auth          Room: pipeline        Room: infrastructure
-   |    |                   |                     |
-   |    +-- Hall: warning   +-- Hall: decision    +-- Hall: procedure
-   |    +-- Hall: decision  +-- Hall: event       +-- Hall: warning
-   |    +-- Hall: fact      +-- Hall: procedure   +-- Hall: fact
-   |    ...                 ...                   ...
-   |
-   +-- Closets (compressed summaries of L3 memories)
-   |
-   +-- Tunnels (cross-bank bridges)
+### Tools
 
-  Layer Cascade (per memory):
-    L0 (critical)  -->  L1 (important)  -->  L2 (normal)  -->  L3 (archive)
-    Always recalled     Recalled by          Recalled on       Compressed
-                        default              deep search       into closets
+| Tool | Description |
+|------|-------------|
+| `memory_retain` | Save a memory with automatic room/hall classification |
+| `memory_recall` | Scoped semantic search with room/hall/layer filters |
+| `memory_reflect` | Deep reasoning — synthesize facts, find patterns, answer with citations |
+| `memory_compress` | Create closet summaries from accumulated facts |
+| `memory_bridge` | Cross-bank tunnels between related memories |
+
+### Setup
+
+```bash
+cd mcp-server
+npm install
+HINDSIGHT_URL=http://localhost:5100 node server.js
 ```
 
-Memories are placed into a **Room x Hall** cell and assigned a layer. As memories age or lose relevance, they cascade down layers (L0 -> L1 -> L2 -> L3). L3 memories are periodically compressed into closets to keep recall fast.
+### Claude Code config
 
-## API Changes
+Add to `~/.claude/mcp.json`:
 
-The base `/retain` and `/recall` endpoints remain fully backward-compatible. New parameters are optional.
+```json
+{
+  "mcpServers": {
+    "mempalace": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/server.js"],
+      "env": {
+        "HINDSIGHT_URL": "http://localhost:5100",
+        "MEMPALACE_BANK": "my-agent-bank"
+      }
+    }
+  }
+}
+```
 
-### New Parameters
+See [`mcp-server/README.md`](./mcp-server/README.md) for full docs and environment variables.
 
-| Endpoint   | Parameter   | Type   | Description                              |
-|------------|-------------|--------|------------------------------------------|
-| `/retain`  | `room`      | string | Topic room for the memory                |
-| `/retain`  | `hall`      | string | Knowledge type hall                      |
-| `/retain`  | `layer`     | int    | Priority layer (0-3, default: 2)         |
-| `/recall`  | `room`      | string | Filter recall to a specific room         |
-| `/recall`  | `hall`      | string | Filter recall to a specific hall         |
-| `/recall`  | `max_layer` | int    | Maximum layer depth to search (0-3)      |
-| `/reflect` | `room`      | string | Scope reflection to a specific room      |
-| `/reflect` | `hall`      | string | Scope reflection to a specific hall      |
+## API changes from upstream
 
-### New Endpoints
+The base `/retain` and `/recall` endpoints are fully backward-compatible. New parameters are optional.
 
-| Method     | Endpoint    | Description                                        |
-|------------|-------------|----------------------------------------------------|
-| POST       | `/bridge`   | Create a cross-bank memory bridge                  |
-| GET        | `/tunnels`  | List existing tunnels                              |
-| POST       | `/tunnels`  | Create or update a tunnel between banks            |
-| GET        | `/closets`  | List compressed memory summaries                   |
-| POST       | `/closets`  | Trigger compression of L3 memories into a closet   |
+### New parameters
 
-## Room/Hall Taxonomy
+| Endpoint | Parameter | Type | Description |
+|----------|-----------|------|-------------|
+| `/retain` | `room` | string | Topic room (auto-classified if omitted) |
+| `/retain` | `hall` | string | Knowledge type (auto-classified if omitted) |
+| `/retain` | `layer` | int | Priority 0-3 (default: 2) |
+| `/recall` | `room` | string | Filter recall to a specific room |
+| `/recall` | `hall` | string | Filter recall to a specific hall |
+| `/recall` | `max_layer` | int | Maximum layer depth to search |
+
+### New endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/bridge` | Create a cross-bank memory bridge |
+| GET | `/tunnels` | List existing tunnels |
+| POST | `/tunnels` | Create a tunnel between banks |
+| GET | `/closets` | List compressed memory summaries |
+| POST | `/closets` | Compress L3 memories into a closet |
+
+## Room/Hall taxonomy
 
 ### Rooms (topics)
 
-| Room             | Description                          |
-|------------------|--------------------------------------|
-| `auth`           | Authentication and authorization     |
-| `pipeline`       | CI/CD and data pipelines             |
-| `infrastructure` | Servers, networking, cloud           |
-| `deployment`     | Deploy processes and environments    |
-| `schema`         | Database schemas and migrations      |
-| `api`            | API design and endpoints             |
-| `ui`             | Frontend and interface               |
-| `tax`            | Tax and financial compliance         |
-| `hr`             | Human resources                      |
-| `legal`          | Legal matters and contracts          |
-| `compliance`     | Regulatory compliance               |
-| `monitoring`     | Observability, logging, alerting     |
-| `agent`          | AI agent behavior and configuration  |
-| `general`        | Uncategorized (default)              |
+`auth` · `pipeline` · `infrastructure` · `deployment` · `schema` · `api` · `ui` · `tax` · `hr` · `legal` · `compliance` · `monitoring` · `agent` · `general`
 
 ### Halls (knowledge types)
 
-| Hall          | Description                              |
-|---------------|------------------------------------------|
-| `warning`     | Pitfalls, gotchas, things to avoid       |
-| `decision`    | Architectural or design decisions made   |
-| `procedure`   | Step-by-step processes and how-tos       |
-| `event`       | Things that happened (incidents, deploys)|
-| `preference`  | User or team preferences                 |
-| `discovery`   | Learned insights and observations        |
-| `fact`        | Objective facts and reference data       |
+`warning` · `decision` · `procedure` · `event` · `preference` · `discovery` · `fact`
 
-## Auto-Classification
+### Layers
 
-MemPalace includes a keyword-based classifier (`room_hall_classifier.py`) that automatically assigns room and hall when not explicitly provided. No LLM call is needed for classification.
+| Layer | Name | Behavior |
+|-------|------|----------|
+| **L0** | Critical | Always recalled |
+| **L1** | Important | Recalled by default |
+| **L2** | Normal | Standard (default for new memories) |
+| **L3** | Archive | Deep search only, compressed into closets |
 
-The classifier works by:
+## Auto-classification
 
-1. Tokenizing the memory text into normalized keywords.
-2. Matching against per-room and per-hall keyword dictionaries.
-3. Scoring each candidate room and hall by keyword hit count.
-4. Selecting the highest-scoring room and hall, falling back to `general` / `fact` if no strong match is found.
+MemPalace includes a keyword-based classifier (`room_hall_classifier.py`) that assigns room and hall automatically when not provided. No LLM call — classification is instant and free.
 
-To extend the classifier, add keywords to the dictionaries in `room_hall_classifier.py`:
+Extensible: add keywords to `ROOM_KEYWORDS` / `HALL_KEYWORDS` dictionaries.
 
-```python
-ROOM_KEYWORDS = {
-    "auth": ["login", "password", "jwt", "token", "oauth", "session", ...],
-    "pipeline": ["ci", "cd", "build", "deploy", "github-actions", ...],
-    # Add new rooms or keywords here
-}
+## Examples
 
-HALL_KEYWORDS = {
-    "warning": ["never", "avoid", "careful", "danger", "dont", "break", ...],
-    "decision": ["decided", "chose", "because", "tradeoff", "adr", ...],
-    # Add new halls or keywords here
-}
-```
-
-## Integration Example
-
-### Retain a memory with room and hall
+### Store a memory
 
 ```bash
 curl -X POST http://localhost:5100/retain \
@@ -144,7 +186,7 @@ curl -X POST http://localhost:5100/retain \
   }'
 ```
 
-### Recall with filters
+### Scoped recall
 
 ```bash
 curl -X POST http://localhost:5100/recall \
@@ -158,7 +200,7 @@ curl -X POST http://localhost:5100/recall \
   }'
 ```
 
-### Create a cross-bank bridge
+### Cross-bank bridge
 
 ```bash
 curl -X POST http://localhost:5100/bridge \
@@ -171,24 +213,39 @@ curl -X POST http://localhost:5100/bridge \
   }'
 ```
 
-## Upstream Compatibility
+## What we changed
 
-This fork tracks `vectorize-io/hindsight` as the `upstream` remote. To pull upstream updates:
+11 patched files, 2 new modules, ~1000 lines total. Plus a standalone MCP server.
+
+Key additions:
+- `room_hall_classifier.py` — keyword-based taxonomy engine (new)
+- `aa1_add_room_hall_to_memory_units.py` — DB migration: flat → hierarchical (new)
+- `mcp-server/` — standalone MCP server with 5 tools (new)
+- Storage layer — room/hall/layer metadata on every write
+- Retrieval — room-scoped search with hall filtering
+- Compression — closet generation with source linking
+- Tunnels — cross-bank memory sharing protocol
+
+Full architectural spec: [MEMPALACE.md](./MEMPALACE.md)
+
+## Upstream compatibility
+
+This fork tracks `vectorize-io/hindsight` as upstream. To pull updates:
 
 ```bash
-git remote add upstream https://github.com/vectorize-io/hindsight.git  # first time only
+git remote add upstream https://github.com/vectorize-io/hindsight.git
 git fetch upstream
 git merge upstream/main
 ```
 
-MemPalace additions are isolated to new files and optional parameters, so upstream merges should be clean in most cases.
-
-## License
-
-Apache 2.0 -- same as the upstream Hindsight project.
+All changes are additive — existing Hindsight behavior is preserved.
 
 ## Credits
 
-- [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) -- the upstream memory API for AI agents
-- MemPalace concept -- hierarchical memory architecture inspired by the method of loci
-- Holetron team -- fork maintainers and MemPalace implementation
+- [**Hindsight**](https://github.com/vectorize-io/hindsight) by vectorize-io — the memory storage engine
+- [**MemPalace**](https://github.com/milla-jovovich/mempalace) by milla-jovovich — the hierarchical taxonomy architecture
+- [Holetron](https://github.com/holetron) — fork maintainers, MCP server, integration
+
+## License
+
+Apache 2.0 — same as upstream Hindsight. See [LICENSE](./LICENSE).

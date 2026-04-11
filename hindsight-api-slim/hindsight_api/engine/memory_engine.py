@@ -89,6 +89,8 @@ _PROTECTED_TABLES = frozenset(
         "chunks",
         "async_operations",
         "file_storage",
+        "tunnels",
+        "closets",
     ]
 )
 
@@ -1732,11 +1734,13 @@ class MemoryEngine(MemoryEngineInterface):
 
                 # Ensure embedding column dimension matches the model's dimension
                 # This is done after migrations and after embeddings.initialize()
+                # Use migration URL (sync driver) when available, fallback to main URL
+                _sync_url = config.migration_database_url or self.db_url
                 for tenant in tenants:
                     schema = tenant.schema
                     if schema:
                         ensure_embedding_dimension(
-                            self.db_url,
+                            _sync_url,
                             self.embeddings.dimension,
                             schema=schema,
                             vector_extension=config.vector_extension,
@@ -1746,14 +1750,14 @@ class MemoryEngine(MemoryEngineInterface):
                 for tenant in tenants:
                     schema = tenant.schema
                     if schema:
-                        ensure_vector_extension(self.db_url, vector_extension=config.vector_extension, schema=schema)
+                        ensure_vector_extension(_sync_url, vector_extension=config.vector_extension, schema=schema)
 
                 # Ensure text search columns/indexes match the configured extension
                 for tenant in tenants:
                     schema = tenant.schema
                     if schema:
                         ensure_text_search_extension(
-                            self.db_url, text_search_extension=config.text_search_extension, schema=schema
+                            _sync_url, text_search_extension=config.text_search_extension, schema=schema
                         )
 
         logger.info(f"Connecting to PostgreSQL at {mask_network_location(self.db_url)}")
@@ -2427,6 +2431,9 @@ class MemoryEngine(MemoryEngineInterface):
         tags: list[str] | None = None,
         tags_match: TagsMatch = "any",
         tag_groups: list[TagGroup] | None = None,
+        room: list[str] | None = None,
+        hall: list[str] | None = None,
+        max_layer: str = "L3",
         _connection_budget: int | None = None,
         _quiet: bool = False,
     ) -> RecallResultModel:
@@ -2571,6 +2578,9 @@ class MemoryEngine(MemoryEngineInterface):
                             tags=tags,
                             tags_match=tags_match,
                             tag_groups=tag_groups,
+                            room=room,
+                            hall=hall,
+                            max_layer=max_layer,
                             connection_budget=_connection_budget,
                             quiet=_quiet,
                             include_source_facts=include_source_facts,
@@ -2699,6 +2709,9 @@ class MemoryEngine(MemoryEngineInterface):
         tags: list[str] | None = None,
         tags_match: TagsMatch = "any",
         tag_groups: list[TagGroup] | None = None,
+        room: list[str] | None = None,
+        hall: list[str] | None = None,
+        max_layer: str = "L3",
         connection_budget: int | None = None,
         quiet: bool = False,
         include_source_facts: bool = False,
@@ -2819,6 +2832,9 @@ class MemoryEngine(MemoryEngineInterface):
                         tags=tags,
                         tags_match=tags_match,
                         tag_groups=tag_groups,
+                        room=room,
+                        hall=hall,
+                        max_layer=max_layer,
                     )
                     parallel_duration = time.time() - parallel_start
             finally:
@@ -2865,6 +2881,17 @@ class MemoryEngine(MemoryEngineInterface):
             # If no temporal results from any fact type, set to None
             if not temporal_results:
                 temporal_results = None
+
+            # ADR-145: Python-side room/hall filtering for graph results
+            # (semantic/BM25/temporal are already SQL-filtered)
+            if room or hall:
+                def _room_hall_match(r):
+                    if room and getattr(r, 'room', None) not in room:
+                        return False
+                    if hall and getattr(r, 'hall', None) not in hall:
+                        return False
+                    return True
+                graph_results = [r for r in graph_results if _room_hall_match(r)]
 
             # Sort combined results by score (descending) so higher-scored results
             # get better ranks in the trace, regardless of fact type
@@ -3419,6 +3446,9 @@ class MemoryEngine(MemoryEngineInterface):
                         metadata=result_dict.get("metadata"),
                         chunk_id=result_dict.get("chunk_id"),
                         tags=result_dict.get("tags"),
+                        room=result_dict.get("room"),
+                        hall=result_dict.get("hall"),
+                        layer=result_dict.get("layer"),
                         source_fact_ids=source_fact_ids_by_obs.get(result_id) if include_source_facts else None,
                     )
                 )
@@ -8138,3 +8168,450 @@ class MemoryEngine(MemoryEngineInterface):
             result_metadata={"mental_model_id": mental_model_id, "name": mental_model["name"]},
             dedupe_by_bank=False,
         )
+
+    # ==================== Tunnel Methods (ADR-145 Phase 4) ====================
+
+    async def create_tunnel_async(
+        self,
+        source_bank: str,
+        source_memory: str,
+        target_bank: str,
+        target_memory: str,
+        relation: str,
+        confidence: float = 0.8,
+        created_by: str | None = None,
+        *,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """Create a cross-bank tunnel between two memories."""
+        await self._authenticate_tenant(request_context)
+        pool = await self._get_pool()
+
+        async with acquire_with_retry(pool) as conn:
+            # Validate source memory exists
+            source_row = await conn.fetchrow(
+                f"SELECT id FROM {fq_table('memory_units')} WHERE id = $1 AND bank_id = $2",
+                uuid.UUID(source_memory),
+                source_bank,
+            )
+            if not source_row:
+                raise ValueError(f"Source memory {source_memory} not found in bank {source_bank}")
+
+            # Validate target memory exists
+            target_row = await conn.fetchrow(
+                f"SELECT id FROM {fq_table('memory_units')} WHERE id = $1 AND bank_id = $2",
+                uuid.UUID(target_memory),
+                target_bank,
+            )
+            if not target_row:
+                raise ValueError(f"Target memory {target_memory} not found in bank {target_bank}")
+
+            # Validate relation type
+            valid_relations = ("same_concept", "depends_on", "contradicts", "extends")
+            if relation not in valid_relations:
+                raise ValueError(f"Invalid relation '{relation}'. Must be one of: {valid_relations}")
+
+            # Insert tunnel (ON CONFLICT returns existing)
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO {fq_table('tunnels')}
+                    (source_bank, source_memory, target_bank, target_memory, relation, confidence, created_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (source_bank, source_memory, target_bank, target_memory, relation) DO UPDATE
+                    SET confidence = EXCLUDED.confidence, created_by = EXCLUDED.created_by
+                RETURNING id, source_bank, source_memory, target_bank, target_memory, relation, confidence, created_by, created_at
+                """,
+                source_bank,
+                uuid.UUID(source_memory),
+                target_bank,
+                uuid.UUID(target_memory),
+                relation,
+                confidence,
+                created_by,
+            )
+
+            return {
+                "id": str(row["id"]),
+                "source_bank": row["source_bank"],
+                "source_memory": str(row["source_memory"]),
+                "target_bank": row["target_bank"],
+                "target_memory": str(row["target_memory"]),
+                "relation": row["relation"],
+                "confidence": row["confidence"],
+                "created_by": row["created_by"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            }
+
+    async def list_tunnels_async(
+        self,
+        bank_id: str,
+        relation: str | None = None,
+        target_bank: str | None = None,
+        *,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """List tunnels for a bank (as source OR target)."""
+        await self._authenticate_tenant(request_context)
+        pool = await self._get_pool()
+
+        async with acquire_with_retry(pool) as conn:
+            where_clauses = ["(source_bank = $1 OR target_bank = $1)"]
+            params: list[Any] = [bank_id]
+            idx = 2
+
+            if relation:
+                where_clauses.append(f"relation = ${idx}")
+                params.append(relation)
+                idx += 1
+
+            if target_bank:
+                where_clauses.append(f"(source_bank = ${idx} OR target_bank = ${idx})")
+                params.append(target_bank)
+                idx += 1
+
+            where_sql = " AND ".join(where_clauses)
+
+            rows = await conn.fetch(
+                f"""
+                SELECT id, source_bank, source_memory, target_bank, target_memory,
+                       relation, confidence, created_by, created_at
+                FROM {fq_table('tunnels')}
+                WHERE {where_sql}
+                ORDER BY created_at DESC
+                """,
+                *params,
+            )
+
+            tunnels = [
+                {
+                    "id": str(row["id"]),
+                    "source_bank": row["source_bank"],
+                    "source_memory": str(row["source_memory"]),
+                    "target_bank": row["target_bank"],
+                    "target_memory": str(row["target_memory"]),
+                    "relation": row["relation"],
+                    "confidence": row["confidence"],
+                    "created_by": row["created_by"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+                for row in rows
+            ]
+
+            return {"tunnels": tunnels, "total": len(tunnels)}
+
+    async def delete_tunnel_async(
+        self,
+        bank_id: str,
+        tunnel_id: str,
+        *,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """Delete a tunnel."""
+        await self._authenticate_tenant(request_context)
+        pool = await self._get_pool()
+
+        async with acquire_with_retry(pool) as conn:
+            result = await conn.execute(
+                f"""
+                DELETE FROM {fq_table('tunnels')}
+                WHERE id = $1 AND (source_bank = $2 OR target_bank = $2)
+                """,
+                uuid.UUID(tunnel_id),
+                bank_id,
+            )
+            deleted = result.split()[-1] != "0"  # "DELETE N"
+            return {"success": True, "deleted": deleted}
+
+    async def get_tunneled_memories_async(
+        self,
+        bank_id: str,
+        memory_ids: list[str],
+        *,
+        request_context: "RequestContext",
+    ) -> list[dict[str, Any]]:
+        """Get related memories from other banks via tunnels.
+
+        Used during recall to fetch cross-bank context.
+        For each memory_id in the recall results, finds tunnels and fetches the other side's memory text.
+        """
+        if not memory_ids:
+            return []
+
+        await self._authenticate_tenant(request_context)
+        pool = await self._get_pool()
+
+        uuid_ids = [uuid.UUID(mid) for mid in memory_ids]
+
+        async with acquire_with_retry(pool) as conn:
+            # Find tunnels where our bank+memories are either source or target
+            rows = await conn.fetch(
+                f"""
+                SELECT t.id AS tunnel_id, t.source_bank, t.source_memory, t.target_bank, t.target_memory,
+                       t.relation, t.confidence,
+                       mu.text AS linked_text, mu.bank_id AS linked_bank
+                FROM {fq_table('tunnels')} t
+                LEFT JOIN {fq_table('memory_units')} mu ON (
+                    CASE
+                        WHEN t.source_bank = $1 AND t.source_memory = ANY($2::uuid[])
+                            THEN mu.id = t.target_memory AND mu.bank_id = t.target_bank
+                        WHEN t.target_bank = $1 AND t.target_memory = ANY($2::uuid[])
+                            THEN mu.id = t.source_memory AND mu.bank_id = t.source_bank
+                        ELSE FALSE
+                    END
+                )
+                WHERE (t.source_bank = $1 AND t.source_memory = ANY($2::uuid[]))
+                   OR (t.target_bank = $1 AND t.target_memory = ANY($2::uuid[]))
+                """,
+                bank_id,
+                uuid_ids,
+            )
+
+            results = []
+            for row in rows:
+                results.append({
+                    "tunnel_id": str(row["tunnel_id"]),
+                    "relation": row["relation"],
+                    "confidence": row["confidence"],
+                    "linked_bank": row["linked_bank"],
+                    "linked_text": row["linked_text"],
+                    "source_bank": row["source_bank"],
+                    "source_memory": str(row["source_memory"]),
+                    "target_bank": row["target_bank"],
+                    "target_memory": str(row["target_memory"]),
+                })
+
+            return results
+
+    # ==================== Closet Methods (ADR-145 Phase 3) ====================
+
+    async def create_closets_async(
+        self,
+        bank_id: str,
+        room: str | None = None,
+        hall: str | None = None,
+        min_sources: int = 5,
+        query: str | None = None,
+        request_context: "RequestContext | None" = None,
+    ) -> dict[str, Any]:
+        """
+        Create compressed closets from memories grouped by room+hall.
+
+        Flow:
+        1. Query memory_units grouped by (room, hall) with count >= min_sources
+        2. For each group, if no existing closet: use LLM to summarize
+        3. Generate embedding for the summary
+        4. Store as Closet with source_ids
+        """
+        from .retain import embedding_utils
+
+        await self._authenticate_tenant(request_context)
+        pool = await self._get_pool()
+
+        closets_created = []
+
+        async with acquire_with_retry(pool) as conn:
+            # Build WHERE clause for optional room/hall filters
+            where_parts = ["bank_id = $1"]
+            params: list[Any] = [bank_id]
+            idx = 2
+
+            if room:
+                where_parts.append(f"room = ${idx}")
+                params.append(room)
+                idx += 1
+            if hall:
+                where_parts.append(f"hall = ${idx}")
+                params.append(hall)
+                idx += 1
+
+            where_sql = " AND ".join(where_parts)
+
+            # Find groups with enough memories to compress
+            groups = await conn.fetch(
+                f"""
+                SELECT room, hall, array_agg(id) AS ids, count(*) AS cnt
+                FROM {fq_table("memory_units")}
+                WHERE {where_sql} AND room IS NOT NULL
+                GROUP BY room, hall
+                HAVING count(*) >= ${idx}
+                ORDER BY count(*) DESC
+                """,
+                *params,
+                min_sources,
+            )
+
+            for group in groups:
+                g_room = group["room"]
+                g_hall = group["hall"]
+                source_ids = [str(uid) for uid in group["ids"]]
+
+                # Check if closet already exists for this room+hall
+                existing = await conn.fetchval(
+                    f"""
+                    SELECT id FROM {fq_table("closets")}
+                    WHERE bank_id = $1 AND room IS NOT DISTINCT FROM $2 AND hall IS NOT DISTINCT FROM $3
+                    LIMIT 1
+                    """,
+                    bank_id,
+                    g_room,
+                    g_hall,
+                )
+                if existing:
+                    continue
+
+                # Collect source memory texts
+                mem_rows = await conn.fetch(
+                    f"""
+                    SELECT text FROM {fq_table("memory_units")}
+                    WHERE bank_id = $1 AND id = ANY($2::uuid[])
+                    ORDER BY event_date DESC
+                    LIMIT 100
+                    """,
+                    bank_id,
+                    group["ids"],
+                )
+                source_texts = [r["text"] for r in mem_rows]
+                combined = "\n".join(f"- {t}" for t in source_texts)
+
+                # Build LLM prompt for compression
+                focus = f" Focus especially on: {query}" if query else ""
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a memory compression assistant. "
+                            "Summarize the following facts into a dense, information-rich paragraph. "
+                            "Preserve key details, names, dates, and decisions. "
+                            "Do NOT add opinions or speculation — only compress what is stated."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Room (topic): {g_room or 'general'}\n"
+                            f"Hall (type): {g_hall or 'mixed'}\n"
+                            f"Number of facts: {len(source_texts)}\n"
+                            f"{focus}\n\n"
+                            f"Facts to compress:\n{combined}"
+                        ),
+                    },
+                ]
+
+                try:
+                    summary = await self._llm_config.call(
+                        messages=messages,
+                        max_completion_tokens=1024,
+                        temperature=0.2,
+                        scope="closet_compress",
+                    )
+                except Exception as e:
+                    logger.error(f"[CLOSET] LLM error for room={g_room}, hall={g_hall}: {e}")
+                    continue
+
+                if not summary or not isinstance(summary, str):
+                    continue
+
+                # Count tokens
+                token_cnt = count_tokens(summary)
+
+                # Generate embedding
+                try:
+                    emb = await embedding_utils.generate_embeddings_batch(self.embeddings, [summary])
+                    embedding_str = str(emb[0]) if emb else None
+                except Exception as e:
+                    logger.error(f"[CLOSET] Embedding error for room={g_room}, hall={g_hall}: {e}")
+                    embedding_str = None
+
+                # Insert closet
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO {fq_table("closets")}
+                    (bank_id, summary, source_ids, room, hall, token_count, embedding)
+                    VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
+                    RETURNING id, created_at
+                    """,
+                    bank_id,
+                    summary,
+                    json.dumps(source_ids),
+                    g_room,
+                    g_hall,
+                    token_cnt,
+                    embedding_str,
+                )
+
+                closets_created.append({
+                    "id": str(row["id"]),
+                    "summary": summary,
+                    "source_count": len(source_ids),
+                    "room": g_room,
+                    "hall": g_hall,
+                    "token_count": token_cnt,
+                    "created_at": row["created_at"].isoformat(),
+                })
+
+                logger.info(
+                    f"[CLOSET] Created closet for bank={bank_id} room={g_room} hall={g_hall} "
+                    f"sources={len(source_ids)} tokens={token_cnt}"
+                )
+
+        return {
+            "success": True,
+            "closets_created": len(closets_created),
+            "closets": closets_created,
+        }
+
+    async def list_closets_async(
+        self,
+        bank_id: str,
+        room: str | None = None,
+        hall: str | None = None,
+        request_context: "RequestContext | None" = None,
+    ) -> dict[str, Any]:
+        """List closets for a bank, optionally filtered by room/hall."""
+        await self._authenticate_tenant(request_context)
+        pool = await self._get_pool()
+
+        async with acquire_with_retry(pool) as conn:
+            where_parts = ["bank_id = $1"]
+            params: list[Any] = [bank_id]
+            idx = 2
+
+            if room:
+                where_parts.append(f"room = ${idx}")
+                params.append(room)
+                idx += 1
+            if hall:
+                where_parts.append(f"hall = ${idx}")
+                params.append(hall)
+                idx += 1
+
+            where_sql = " AND ".join(where_parts)
+
+            rows = await conn.fetch(
+                f"""
+                SELECT id, summary, source_ids, room, hall, token_count, created_at
+                FROM {fq_table("closets")}
+                WHERE {where_sql}
+                ORDER BY created_at DESC
+                """,
+                *params,
+            )
+
+            closets = []
+            for row in rows:
+                raw_ids = row["source_ids"] if row["source_ids"] else []
+                src_ids = json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids
+                closets.append({
+                    "id": str(row["id"]),
+                    "summary": row["summary"],
+                    "source_count": len(src_ids) if isinstance(src_ids, list) else 0,
+                    "room": row["room"],
+                    "hall": row["hall"],
+                    "token_count": row["token_count"],
+                    "created_at": row["created_at"].isoformat(),
+                })
+
+            return {
+                "closets": closets,
+                "total": len(closets),
+            }

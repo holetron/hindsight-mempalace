@@ -98,6 +98,9 @@ async def retrieve_semantic_bm25_combined(
     tags: list[str] | None = None,
     tags_match: TagsMatch = "any",
     tag_groups: list[TagGroup] | None = None,
+    room: list[str] | None = None,
+    hall: list[str] | None = None,
+    max_layer: str = "L3",
 ) -> dict[str, tuple[list[RetrievalResult], list[RetrievalResult]]]:
     """
     Combined semantic + BM25 retrieval for multiple fact types in a single query.
@@ -141,7 +144,7 @@ async def retrieve_semantic_bm25_combined(
 
     cols = (
         "id, text, context, event_date, occurred_start, occurred_end, mentioned_at, "
-        "fact_type, document_id, chunk_id, tags, metadata, proof_count"
+        "fact_type, document_id, chunk_id, tags, metadata, proof_count, room, hall, layer"
     )
     table = fq_table("memory_units")
 
@@ -161,7 +164,31 @@ async def retrieve_semantic_bm25_combined(
 
     # tag_groups params start immediately after the tags param slot
     tag_groups_param_start = tags_param_idx + (1 if tags else 0)
-    groups_clause, groups_params, _ = build_tag_groups_where_clause(tag_groups, tag_groups_param_start)
+    groups_clause, groups_params, next_param = build_tag_groups_where_clause(tag_groups, tag_groups_param_start)
+
+    # ADR-145: Room/Hall filtering — applied BEFORE semantic search for accuracy boost
+    room_clause = ""
+    room_params = []
+    if room:
+        room_clause = f"AND room = ANY(${next_param}::text[])"
+        room_params = [room]
+        next_param += 1
+    hall_clause = ""
+    hall_params = []
+    if hall:
+        hall_clause = f"AND hall = ANY(${next_param}::text[])"
+        hall_params = [hall]
+        next_param += 1
+
+    # ADR-145: Layer filtering — cascade from L0 to max_layer
+    layer_order = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+    layer_clause = ""
+    layer_params = []
+    if max_layer and max_layer != "L3":
+        allowed_layers = [l for l, v in layer_order.items() if v <= layer_order.get(max_layer, 3)]
+        layer_clause = f"AND COALESCE(layer, 'L2') = ANY(${next_param}::text[])"
+        layer_params = [allowed_layers]
+        next_param += 1
 
     # --- Semantic UNION ALL arms (one per fact_type) ---
     # Each arm has its own ORDER BY embedding <=> $1 LIMIT {hnsw_fetch}, which
@@ -180,6 +207,9 @@ async def retrieve_semantic_bm25_combined(
             f"   AND (1 - (embedding <=> $1::vector)) >= 0.3"
             f"   {tags_clause}"
             f"   {groups_clause}"
+            f"   {room_clause}"
+            f"   {hall_clause}"
+            f"   {layer_clause}"
             f" ORDER BY embedding <=> $1::vector"
             f" LIMIT {hnsw_fetch})"
         )
@@ -220,6 +250,9 @@ async def retrieve_semantic_bm25_combined(
                 f"   {bm25_where_filter}"
                 f"   {tags_clause}"
                 f"   {groups_clause}"
+                f"   {room_clause}"
+                f"   {hall_clause}"
+                f"   {layer_clause}"
                 f" ORDER BY {bm25_order_by}"
                 f" LIMIT $3)"
             )
@@ -233,6 +266,9 @@ async def retrieve_semantic_bm25_combined(
     if tags:
         params.append(tags)
     params.extend(groups_params)
+    params.extend(room_params)
+    params.extend(hall_params)
+    params.extend(layer_params)
 
     rows = await conn.fetch(query, *params)
 
@@ -266,6 +302,9 @@ async def retrieve_temporal_combined(
     tags: list[str] | None = None,
     tags_match: TagsMatch = "any",
     tag_groups: list[TagGroup] | None = None,
+    room: list[str] | None = None,
+    hall: list[str] | None = None,
+    max_layer: str = "L3",
 ) -> dict[str, list[RetrievalResult]]:
     """
     Temporal retrieval for multiple fact types in a single query.
@@ -298,11 +337,39 @@ async def retrieve_temporal_combined(
     # Entry point query: fixed params are $1-$6, tags at $7
     tags_clause = build_tags_where_clause_simple(tags, 7, match=tags_match)
     tag_groups_param_start = 7 + (1 if tags else 0)
-    groups_clause, groups_params, _ = build_tag_groups_where_clause(tag_groups, tag_groups_param_start)
+    groups_clause, groups_params, next_param = build_tag_groups_where_clause(tag_groups, tag_groups_param_start)
+
+    # ADR-145: Room/Hall filtering
+    room_clause = ""
+    room_params_list = []
+    if room:
+        room_clause = f"AND room = ANY(${next_param}::text[])"
+        room_params_list = [room]
+        next_param += 1
+    hall_clause = ""
+    hall_params_list = []
+    if hall:
+        hall_clause = f"AND hall = ANY(${next_param}::text[])"
+        hall_params_list = [hall]
+        next_param += 1
+
+    # ADR-145: Layer filtering — cascade from L0 to max_layer
+    layer_order = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+    layer_clause = ""
+    layer_params_list = []
+    if max_layer and max_layer != "L3":
+        allowed_layers = [l for l, v in layer_order.items() if v <= layer_order.get(max_layer, 3)]
+        layer_clause = f"AND COALESCE(layer, 'L2') = ANY(${next_param}::text[])"
+        layer_params_list = [allowed_layers]
+        next_param += 1
+
     params: list = [query_emb_str, bank_id, fact_types, start_date, end_date, semantic_threshold]
     if tags:
         params.append(tags)
     params.extend(groups_params)
+    params.extend(room_params_list)
+    params.extend(hall_params_list)
+    params.extend(layer_params_list)
 
     # Two-phase entry point query:
     # Phase 1 (date_ranked): rank by date only — no embedding computation — for all units in
@@ -334,9 +401,12 @@ async def retrieve_temporal_combined(
               )
               {tags_clause}
               {groups_clause}
+              {room_clause}
+              {hall_clause}
+              {layer_clause}
         ),
         sim_ranked AS (
-            SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.proof_count, mu.document_id, mu.chunk_id, mu.tags, mu.metadata,
+            SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.proof_count, mu.document_id, mu.chunk_id, mu.tags, mu.metadata, mu.room, mu.hall, mu.layer,
                    1 - (mu.embedding <=> $1::vector) AS similarity,
                    ROW_NUMBER() OVER (PARTITION BY mu.fact_type ORDER BY mu.embedding <=> $1::vector) AS sim_rn
             FROM date_ranked dr
@@ -344,7 +414,7 @@ async def retrieve_temporal_combined(
             WHERE dr.rn <= 50
               AND (1 - (mu.embedding <=> $1::vector)) >= $6
         )
-        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, proof_count, document_id, chunk_id, tags, metadata, similarity
+        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, proof_count, document_id, chunk_id, tags, metadata, room, hall, layer, similarity
         FROM sim_ranked
         WHERE sim_rn <= 10
         """,
@@ -442,7 +512,7 @@ async def retrieve_temporal_combined(
             # bank_id on memory_units lets the planner use idx_memory_units_bank_fact_type.
             neighbors = await conn.fetch(
                 f"""
-                SELECT src.from_unit_id, mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.metadata,
+                SELECT src.from_unit_id, mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.metadata, mu.room, mu.hall,
                        l.weight, l.link_type,
                        1 - (mu.embedding <=> $1::vector) AS similarity
                 FROM unnest($2::uuid[]) AS src(from_unit_id)
@@ -536,6 +606,9 @@ async def retrieve_all_fact_types_parallel(
     tags: list[str] | None = None,
     tags_match: TagsMatch = "any",
     tag_groups: list[TagGroup] | None = None,
+    room: list[str] | None = None,
+    hall: list[str] | None = None,
+    max_layer: str = "L3",
 ) -> MultiFactTypeRetrievalResult:
     """
     Optimized retrieval for multiple fact types using batched queries.
@@ -594,6 +667,9 @@ async def retrieve_all_fact_types_parallel(
             tags=tags,
             tags_match=tags_match,
             tag_groups=tag_groups,
+            room=room,
+            hall=hall,
+            max_layer=max_layer,
         )
         semantic_bm25_time = time.time() - semantic_bm25_start
 
@@ -613,6 +689,9 @@ async def retrieve_all_fact_types_parallel(
                 tags=tags,
                 tags_match=tags_match,
                 tag_groups=tag_groups,
+                room=room,
+                hall=hall,
+                max_layer=max_layer,
             )
             temporal_time = time.time() - temporal_start
 

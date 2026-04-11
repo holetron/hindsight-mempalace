@@ -171,6 +171,22 @@ class RecallRequest(BaseModel):
         description="Compound tag filter using boolean groups. Groups in the list are AND-ed. "
         "Each group is a leaf {tags, match} or compound {and: [...]}, {or: [...]}, {not: ...}.",
     )
+    room: list[str] | None = Field(
+        default=None,
+        description="Filter by room (topic). If specified, only memories in these rooms are searched. "
+        "Applied BEFORE semantic search for +34% accuracy improvement.",
+    )
+    hall: list[str] | None = Field(
+        default=None,
+        description="Filter by hall (knowledge type). If specified, only these knowledge types are searched. "
+        "Values: fact, event, decision, preference, discovery, procedure, warning.",
+    )
+    max_layer: Literal["L0", "L1", "L2", "L3"] = Field(
+        default="L3",
+        description="Maximum memory layer to search (ADR-145). Recall searches L0 through max_layer. "
+        "L0=Identity only, L1=Identity+Critical, L2=+Session, L3=+Deep (all, default). "
+        "Results are ordered with L0 first (highest priority).",
+    )
 
     @field_validator("query")
     @classmethod
@@ -223,6 +239,9 @@ class RecallResult(BaseModel):
     metadata: dict[str, str] | None = None  # User-defined metadata
     chunk_id: str | None = None  # Chunk this fact was extracted from
     tags: list[str] | None = None  # Visibility scope tags
+    room: str | None = None  # Topic classification (ADR-145 MemPalace)
+    hall: str | None = None  # Knowledge type classification (ADR-145 MemPalace)
+    layer: str | None = None  # Memory layer (ADR-145: L0-L3)
     source_fact_ids: list[str] | None = (
         None  # IDs of source facts (observation type only, when source_facts is enabled)
     )
@@ -468,6 +487,24 @@ class MemoryItem(BaseModel):
         description="How to handle an existing document with the same document_id. "
         "'replace' (default) deletes old data and reprocesses from scratch. "
         "'append' concatenates new content to the existing document text and reprocesses.",
+    )
+    room: str | None = Field(
+        default=None,
+        description="Topic classification for hierarchical filtering (ADR-145 MemPalace). "
+        "Examples: auth, pipeline, schema, tax, hr, legal, compliance, infrastructure, ui, api, deployment, monitoring. "
+        "Use 'custom:{name}' for custom topics. Auto-classified by LLM if not provided.",
+    )
+    hall: str | None = Field(
+        default=None,
+        description="Knowledge type classification (ADR-145 MemPalace). "
+        "One of: fact, event, decision, preference, discovery, procedure, warning. "
+        "Auto-classified by LLM if not provided.",
+    )
+    layer: Literal["L0", "L1", "L2", "L3"] = Field(
+        default="L2",
+        description="Memory layer (ADR-145). L0=Identity (~50 tokens, always loaded), "
+        "L1=Critical Facts (~120 tokens, per-space), L2=Session Context (default), "
+        "L3=Deep Memory (full search).",
     )
 
     @field_validator("timestamp", mode="before")
@@ -956,6 +993,94 @@ class BackgroundResponse(BaseModel):
     # Deprecated fields kept for backwards compatibility
     background: str | None = Field(default=None, description="Deprecated: same as mission")
     disposition: DispositionTraits | None = None
+
+
+class CreateTunnelRequest(BaseModel):
+    """Request to create a cross-bank memory bridge."""
+
+    source_bank: str = Field(description="Source bank ID")
+    source_memory: str = Field(description="Source memory unit UUID")
+    target_bank: str = Field(description="Target bank ID")
+    target_memory: str = Field(description="Target memory unit UUID")
+    relation: Literal["same_concept", "depends_on", "contradicts", "extends"] = Field(
+        description="Relationship type between the memories"
+    )
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Confidence score (0.0-1.0)")
+    created_by: str | None = Field(default=None, description="Agent slug or user who creates the tunnel")
+
+
+class TunnelItem(BaseModel):
+    """A single tunnel."""
+
+    id: str
+    source_bank: str
+    source_memory: str
+    target_bank: str
+    target_memory: str
+    relation: str
+    confidence: float
+    created_by: str | None = None
+    created_at: str
+
+
+class CreateTunnelResponse(BaseModel):
+    """Response from tunnel creation."""
+
+    success: bool
+    tunnel: TunnelItem
+
+
+class ListTunnelsResponse(BaseModel):
+    """Response from listing tunnels."""
+
+    tunnels: list[TunnelItem] = []
+    total: int = 0
+
+
+class DeleteTunnelResponse(BaseModel):
+    """Response from deleting a tunnel."""
+
+    success: bool
+    deleted: bool = False
+
+
+# ── Closet models (ADR-145 Phase 3) ──────────────────────────
+
+
+class CreateClosetRequest(BaseModel):
+    """Request model for creating a closet (compressed summary)."""
+
+    room: str | None = Field(default=None, description="Room (topic) to compress. If not provided, compresses all.")
+    hall: str | None = Field(default=None, description="Hall (knowledge type) to compress. If not provided, compresses all.")
+    min_sources: int = Field(default=5, description="Minimum number of source memories to create a closet (default: 5)")
+    query: str | None = Field(default=None, description="Optional query to guide compression focus")
+
+
+class ClosetItem(BaseModel):
+    """A single closet."""
+
+    id: str
+    summary: str
+    source_count: int
+    room: str | None = None
+    hall: str | None = None
+    token_count: int = 0
+    created_at: str
+
+
+class CreateClosetResponse(BaseModel):
+    """Response from closet creation."""
+
+    success: bool
+    closets_created: int = 0
+    closets: list[ClosetItem] = FieldWithDefault(list, description="Created closets")
+
+
+class ListClosetsResponse(BaseModel):
+    """Response from listing closets."""
+
+    closets: list[ClosetItem] = FieldWithDefault(list, description="Closets")
+    total: int = 0
 
 
 class BankListItem(BaseModel):
@@ -2959,6 +3084,9 @@ def _register_routes(app: FastAPI):
                     tags=request.tags,
                     tags_match=request.tags_match,
                     tag_groups=request.tag_groups,
+                    room=request.room,
+                    hall=request.hall,
+                    max_layer=request.max_layer,
                 )
 
             # Convert core MemoryFact objects to API RecallResult objects (excluding internal metrics)
@@ -2976,6 +3104,9 @@ def _register_routes(app: FastAPI):
                     metadata=fact.metadata,
                     chunk_id=fact.chunk_id,
                     tags=fact.tags,
+                    room=getattr(fact, 'room', None),
+                    hall=getattr(fact, 'hall', None),
+                    layer=getattr(fact, 'layer', None),
                     source_fact_ids=fact.source_fact_ids,
                 )
 
@@ -5333,6 +5464,12 @@ def _register_routes(app: FastAPI):
                     content_dict["observation_scopes"] = item.observation_scopes
                 if item.update_mode is not None:
                     content_dict["update_mode"] = item.update_mode
+                if item.room:
+                    content_dict["room"] = item.room
+                if item.hall:
+                    content_dict["hall"] = item.hall
+                if item.layer and item.layer != "L2":
+                    content_dict["layer"] = item.layer
                 strategy_groups[effective].append(content_dict)
 
             if request.async_:
@@ -5886,4 +6023,166 @@ def _register_routes(app: FastAPI):
             import traceback
 
             logger.error(f"Error getting audit log stats: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ==================== Tunnel Endpoints (ADR-145 Phase 4) ====================
+
+    @app.post(
+        "/v1/default/banks/{bank_id}/tunnels",
+        response_model=CreateTunnelResponse,
+        summary="Create tunnel (cross-bank bridge)",
+        description="Create a cross-bank memory bridge between two memories in different banks. ADR-145 MemPalace.",
+        operation_id="create_tunnel",
+        tags=["Memory"],
+    )
+    async def api_create_tunnel(
+        bank_id: str, request: CreateTunnelRequest, request_context: RequestContext = Depends(get_request_context)
+    ):
+        """Create a tunnel between two memories."""
+        try:
+            tunnel = await app.state.memory.create_tunnel_async(
+                source_bank=request.source_bank,
+                source_memory=request.source_memory,
+                target_bank=request.target_bank,
+                target_memory=request.target_memory,
+                relation=request.relation,
+                confidence=request.confidence,
+                created_by=request.created_by,
+                request_context=request_context,
+            )
+            return CreateTunnelResponse(success=True, tunnel=TunnelItem(**tunnel))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            import traceback
+
+            logger.error(f"Error creating tunnel for bank {bank_id}: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get(
+        "/v1/default/banks/{bank_id}/tunnels",
+        response_model=ListTunnelsResponse,
+        summary="List tunnels",
+        description="List cross-bank memory bridges for a bank (both as source and target).",
+        operation_id="list_tunnels",
+        tags=["Memory"],
+    )
+    async def api_list_tunnels(
+        bank_id: str,
+        relation: str | None = Query(default=None, description="Filter by relation type"),
+        target_bank: str | None = Query(default=None, description="Filter by target bank"),
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """List tunnels for a bank."""
+        try:
+            result = await app.state.memory.list_tunnels_async(
+                bank_id=bank_id,
+                relation=relation,
+                target_bank=target_bank,
+                request_context=request_context,
+            )
+            tunnels = [TunnelItem(**t) for t in result["tunnels"]]
+            return ListTunnelsResponse(tunnels=tunnels, total=result["total"])
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            import traceback
+
+            logger.error(f"Error listing tunnels for bank {bank_id}: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete(
+        "/v1/default/banks/{bank_id}/tunnels/{tunnel_id}",
+        response_model=DeleteTunnelResponse,
+        summary="Delete tunnel",
+        description="Delete a cross-bank memory bridge.",
+        operation_id="delete_tunnel",
+        tags=["Memory"],
+    )
+    async def api_delete_tunnel(
+        bank_id: str, tunnel_id: str, request_context: RequestContext = Depends(get_request_context)
+    ):
+        """Delete a tunnel."""
+        try:
+            result = await app.state.memory.delete_tunnel_async(
+                bank_id=bank_id,
+                tunnel_id=tunnel_id,
+                request_context=request_context,
+            )
+            return DeleteTunnelResponse(**result)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            import traceback
+
+            logger.error(f"Error deleting tunnel {tunnel_id}: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Closet endpoints (ADR-145 Phase 3) ────────────────────────
+
+    @app.post(
+        "/v1/default/banks/{bank_id}/closets",
+        response_model=CreateClosetResponse,
+        summary="Create closets (compressed summaries)",
+        description="Compress memories by room+hall into closets. ADR-145 MemPalace Phase 3.",
+        operation_id="create_closets",
+        tags=["Memory"],
+    )
+    async def api_create_closets(
+        bank_id: str, request: CreateClosetRequest, request_context: RequestContext = Depends(get_request_context)
+    ):
+        """Create compressed memory closets."""
+        try:
+            result = await app.state.memory.create_closets_async(
+                bank_id=bank_id,
+                room=request.room,
+                hall=request.hall,
+                min_sources=request.min_sources,
+                query=request.query,
+                request_context=request_context,
+            )
+            return CreateClosetResponse(**result)
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            import traceback
+
+            logger.error(f"Error creating closets for bank {bank_id}: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get(
+        "/v1/default/banks/{bank_id}/closets",
+        response_model=ListClosetsResponse,
+        summary="List closets",
+        description="List all compressed memory summaries for a bank.",
+        operation_id="list_closets",
+        tags=["Memory"],
+    )
+    async def api_list_closets(
+        bank_id: str,
+        room: str | None = Query(None, description="Filter by room"),
+        hall: str | None = Query(None, description="Filter by hall"),
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """List closets for a bank."""
+        try:
+            result = await app.state.memory.list_closets_async(
+                bank_id=bank_id,
+                room=room,
+                hall=hall,
+                request_context=request_context,
+            )
+            return ListClosetsResponse(**result)
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            import traceback
+
+            logger.error(f"Error listing closets for bank {bank_id}: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(e))

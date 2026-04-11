@@ -28,6 +28,9 @@ class RetainContentDict(TypedDict, total=False):
         update_mode: How to handle existing documents with the same document_id (optional).
             "replace" (default) deletes old data and reprocesses. "append" concatenates
             new content to the existing document and reprocesses.
+        room: Topic classification for hierarchical filtering (ADR-145)
+        hall: Knowledge type classification (ADR-145)
+        layer: Memory layer L0-L3 (ADR-145)
     """
 
     content: str  # Required
@@ -41,6 +44,9 @@ class RetainContentDict(TypedDict, total=False):
         Literal["per_tag", "combined", "all_combinations"] | list[list[str]]
     )  # Observation scopes for consolidation
     update_mode: Literal["replace", "append"]
+    room: str  # Topic classification (ADR-145 MemPalace)
+    hall: str  # Knowledge type classification (ADR-145 MemPalace)
+    layer: str  # Memory layer: L0, L1, L2 (default), L3 (ADR-145)
 
 
 @dataclass
@@ -60,6 +66,9 @@ class RetainContent:
     observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = (
         None  # Observation scopes
     )
+    room: str | None = None  # Topic classification (ADR-145 MemPalace)
+    hall: str | None = None  # Knowledge type classification (ADR-145 MemPalace)
+    layer: str = "L2"  # Memory layer: L0, L1, L2 (default), L3 (ADR-145)
 
 
 @dataclass
@@ -128,6 +137,9 @@ class ExtractedFact:
     observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = (
         None  # Observation scopes
     )
+    room: str | None = None  # Topic classification (ADR-145 MemPalace)
+    hall: str | None = None  # Knowledge type classification (ADR-145 MemPalace)
+    layer: str = "L2"  # Memory layer: L0, L1, L2 (default), L3 (ADR-145)
 
 
 @dataclass
@@ -179,6 +191,11 @@ class ProcessedFact:
     # Observation scopes for consolidation
     observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = None
 
+    # ADR-145 MemPalace: hierarchical classification
+    room: str | None = None  # Topic classification
+    hall: str | None = None  # Knowledge type classification
+    layer: str = "L2"  # Memory layer: L0, L1, L2 (default), L3
+
     @property
     def is_duplicate(self) -> bool:
         """Check if this fact was marked as a duplicate."""
@@ -222,6 +239,9 @@ class ProcessedFact:
             content_index=extracted_fact.content_index,
             tags=extracted_fact.tags,
             observation_scopes=extracted_fact.observation_scopes,
+            room=extracted_fact.room,
+            hall=extracted_fact.hall,
+            layer=extracted_fact.layer,
         )
 
 

@@ -1990,6 +1990,9 @@ async def extract_facts_from_contents_batch_api(
                 metadata=content.metadata,
                 tags=content.tags,
                 observation_scopes=content.observation_scopes,
+                room=getattr(content, 'room', None),
+                hall=getattr(content, 'hall', None),
+                layer=getattr(content, 'layer', 'L2'),
             )
 
             extracted_facts.append(extracted_fact)
@@ -2044,6 +2047,9 @@ def _extract_facts_chunks(
                     metadata=content.metadata,
                     tags=content.tags,
                     observation_scopes=content.observation_scopes,
+                    room=getattr(content, 'room', None),
+                    hall=getattr(content, 'hall', None),
+                    layer=getattr(content, 'layer', 'L2'),
                 )
             )
             global_chunk_idx += 1
@@ -2183,6 +2189,9 @@ async def extract_facts_from_contents(
                         metadata=content.metadata,
                         tags=content.tags,
                         observation_scopes=content.observation_scopes,
+                        room=getattr(content, 'room', None),
+                        hall=getattr(content, 'hall', None),
+                        layer=getattr(content, 'layer', 'L2'),
                     )
 
                     extracted_facts.append(extracted_fact)

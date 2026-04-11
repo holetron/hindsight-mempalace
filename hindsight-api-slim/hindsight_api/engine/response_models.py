@@ -175,6 +175,9 @@ class MemoryFact(BaseModel):
         None, description="ID of the chunk this fact was extracted from (format: bank_id_document_id_chunk_index)"
     )
     tags: list[str] | None = Field(None, description="Visibility scope tags associated with this fact")
+    room: str | None = Field(None, description="Topic classification (ADR-145 MemPalace)")
+    hall: str | None = Field(None, description="Knowledge type classification (ADR-145 MemPalace)")
+    layer: str | None = Field(None, description="Memory layer (ADR-145: L0, L1, L2, L3)")
     source_fact_ids: list[str] | None = Field(
         None,
         description="IDs of source facts this observation was derived from (observation type only, when source_facts is enabled)",

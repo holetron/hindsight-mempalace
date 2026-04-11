@@ -49,6 +49,9 @@ class RetrievalResult:
     tags: list[str] | None = None  # Visibility scope tags
     metadata: dict[str, str] | None = None  # User-provided metadata
     proof_count: int | None = None  # Number of supporting memories (observations only)
+    room: str | None = None  # Topic classification (ADR-145 MemPalace)
+    hall: str | None = None  # Knowledge type classification (ADR-145 MemPalace)
+    layer: str | None = None  # Memory layer (ADR-145: L0-L3)
 
     # Retrieval-specific scores (only one will be set depending on retrieval method)
     similarity: float | None = None  # Semantic retrieval
@@ -74,6 +77,9 @@ class RetrievalResult:
             tags=row.get("tags"),
             metadata=row.get("metadata"),
             proof_count=row.get("proof_count"),
+            room=row.get("room"),
+            hall=row.get("hall"),
+            layer=row.get("layer"),
             similarity=row.get("similarity"),
             bm25_score=row.get("bm25_score"),
             activation=row.get("activation"),
@@ -158,6 +164,9 @@ class ScoredResult:
             "chunk_id": self.retrieval.chunk_id,
             "tags": self.retrieval.tags,
             "metadata": self.retrieval.metadata,
+            "room": self.retrieval.room,
+            "hall": self.retrieval.hall,
+            "layer": self.retrieval.layer,
             "semantic_similarity": self.retrieval.similarity,
             "bm25_score": self.retrieval.bm25_score,
         }

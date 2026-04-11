@@ -64,7 +64,7 @@ async def _find_semantic_seeds(
     rows = await conn.fetch(
         f"""
         SELECT id, text, context, event_date, occurred_start, occurred_end,
-               mentioned_at, fact_type, document_id, chunk_id, tags, proof_count,
+               mentioned_at, fact_type, document_id, chunk_id, tags, proof_count, room, hall, layer,
                1 - (embedding <=> $1::vector) AS similarity
         FROM {fq_table("memory_units")}
         WHERE bank_id = $2
@@ -289,7 +289,7 @@ class LinkExpansionRetriever(GraphRetriever):
             entity_expanded AS (
                 SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                        mu.occurred_end, mu.mentioned_at,
-                       mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
+                       mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer,
                        COUNT(DISTINCT se.entity_id)::float AS score,
                        'entity'::text AS source
                 FROM seed_entities se
@@ -316,14 +316,14 @@ class LinkExpansionRetriever(GraphRetriever):
                 SELECT
                     id, text, context, event_date, occurred_start,
                     occurred_end, mentioned_at,
-                    fact_type, document_id, chunk_id, tags, proof_count,
+                    fact_type, document_id, chunk_id, tags, proof_count, room, hall, layer,
                     MAX(weight) AS score,
                     'semantic'::text AS source
                 FROM (
                     SELECT
                         mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                         mu.occurred_end, mu.mentioned_at,
-                        mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
+                        mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer,
                         ml.weight
                     FROM {ml} ml
                     JOIN {mu} mu ON mu.id = ml.to_unit_id
@@ -335,7 +335,7 @@ class LinkExpansionRetriever(GraphRetriever):
                     SELECT
                         mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                         mu.occurred_end, mu.mentioned_at,
-                        mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
+                        mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer,
                         ml.weight
                     FROM {ml} ml
                     JOIN {mu} mu ON mu.id = ml.from_unit_id
@@ -346,7 +346,7 @@ class LinkExpansionRetriever(GraphRetriever):
                 ) sem_raw
                 GROUP BY id, text, context, event_date, occurred_start,
                          occurred_end, mentioned_at,
-                         fact_type, document_id, chunk_id, tags, proof_count
+                         fact_type, document_id, chunk_id, tags, proof_count, room, hall, layer
                 ORDER BY score DESC
                 LIMIT $3
             ),
@@ -357,7 +357,7 @@ class LinkExpansionRetriever(GraphRetriever):
                 SELECT DISTINCT ON (mu.id)
                     mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                     mu.occurred_end, mu.mentioned_at,
-                    mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
+                    mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer,
                     ml.weight AS score,
                     'causal'::text AS source
                 FROM {ml} ml
@@ -480,7 +480,7 @@ class LinkExpansionRetriever(GraphRetriever):
             SELECT
                 mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                 mu.occurred_end, mu.mentioned_at,
-                mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
+                mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer,
                 (SELECT COUNT(DISTINCT s) FROM unnest(mu.source_memory_ids) s WHERE s = ANY(ca.source_ids))::float AS score
             FROM {fq_table("memory_units")} mu, connected_array ca
             WHERE mu.fact_type = 'observation'
@@ -504,13 +504,13 @@ class LinkExpansionRetriever(GraphRetriever):
                 SELECT
                     id, text, context, event_date, occurred_start,
                     occurred_end, mentioned_at,
-                    fact_type, document_id, chunk_id, tags, proof_count,
+                    fact_type, document_id, chunk_id, tags, proof_count, room, hall, layer,
                     MAX(weight) AS score,
                     'semantic'::text AS source
                 FROM (
                     SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                            mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id,
-                           mu.chunk_id, mu.tags, mu.proof_count, ml.weight
+                           mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer, ml.weight
                     FROM {ml} ml JOIN {mu} mu ON mu.id = ml.to_unit_id
                     WHERE ml.from_unit_id = ANY($1::uuid[])
                       AND ml.link_type = 'semantic' AND mu.fact_type = 'observation'
@@ -518,21 +518,21 @@ class LinkExpansionRetriever(GraphRetriever):
                     UNION ALL
                     SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                            mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id,
-                           mu.chunk_id, mu.tags, mu.proof_count, ml.weight
+                           mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer, ml.weight
                     FROM {ml} ml JOIN {mu} mu ON mu.id = ml.from_unit_id
                     WHERE ml.to_unit_id = ANY($1::uuid[])
                       AND ml.link_type = 'semantic' AND mu.fact_type = 'observation'
                       AND mu.id != ALL($1::uuid[])
                 ) sem_raw
                 GROUP BY id, text, context, event_date, occurred_start, occurred_end,
-                         mentioned_at, fact_type, document_id, chunk_id, tags, proof_count
+                         mentioned_at, fact_type, document_id, chunk_id, tags, proof_count, room, hall, layer
                 ORDER BY score DESC LIMIT $2
             ),
             causal_expanded AS (
                 SELECT DISTINCT ON (mu.id)
                     mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                     mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id,
-                    mu.chunk_id, mu.tags, mu.proof_count, ml.weight AS score, 'causal'::text AS source
+                    mu.chunk_id, mu.tags, mu.proof_count, mu.room, mu.hall, mu.layer, ml.weight AS score, 'causal'::text AS source
                 FROM {ml} ml JOIN {mu} mu ON ml.to_unit_id = mu.id
                 WHERE ml.from_unit_id = ANY($1::uuid[])
                   AND ml.link_type IN ('causes', 'caused_by', 'enables', 'prevents')

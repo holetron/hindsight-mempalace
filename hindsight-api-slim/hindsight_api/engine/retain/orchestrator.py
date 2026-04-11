@@ -390,6 +390,10 @@ async def _extract_and_embed(
 
     processed_facts = [ProcessedFact.from_extracted_fact(ef, emb) for ef, emb in zip(extracted_facts, embeddings)]
 
+    # ADR-145: Auto-classify room/hall for facts that don't have them set
+    from .room_hall_classifier import classify_facts_batch
+    classify_facts_batch(processed_facts)
+
     return extracted_facts, processed_facts, chunks, usage
 
 
@@ -863,6 +867,9 @@ async def _streaming_retain_batch(
                 entities=source.entities,
                 tags=source.tags,
                 observation_scopes=source.observation_scopes,
+                room=getattr(source, 'room', None),
+                hall=getattr(source, 'hall', None),
+                layer=getattr(source, 'layer', 'L2'),
             )
             extracted, processed, chunk_meta, usage = await _extract_and_embed(
                 [content],
@@ -1480,6 +1487,9 @@ def _build_contents(contents_dicts: list[RetainContentDict], document_tags: list
             entities=item.get("entities", []),
             tags=merged_tags,
             observation_scopes=item.get("observation_scopes"),
+            room=item.get("room"),
+            hall=item.get("hall"),
+            layer=item.get("layer", "L2"),
         )
         contents.append(content)
     return contents
@@ -1536,6 +1546,9 @@ def _build_delta_contents(
             entities=template_content.entities,
             tags=template_content.tags,
             observation_scopes=template_content.observation_scopes,
+            room=getattr(template_content, 'room', None),
+            hall=getattr(template_content, 'hall', None),
+            layer=getattr(template_content, 'layer', 'L2'),
         )
         delta_contents.append(delta_content)
         delta_chunk_map[len(delta_contents) - 1] = original_chunk_idx

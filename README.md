@@ -248,4 +248,4 @@ All changes are additive — existing Hindsight behavior is preserved.
 
 ## License
 
-Apache 2.0 — same as upstream Hindsight. See [LICENSE](./LICENSE).
+MIT — same as upstream Hindsight. See [LICENSE](./LICENSE).

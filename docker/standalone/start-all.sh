@@ -156,7 +156,10 @@ PIDS=()
 # Start API if enabled
 if [ "$ENABLE_API" = "true" ]; then
     cd /app/api
-    API_HEALTH_URL="${HINDSIGHT_API_HEALTH_URL:-http://localhost:8888/health}"
+    # Health probe must follow HINDSIGHT_API_PORT — hardcoding 8888 made the
+    # readiness check hit a dead port whenever the API was bound elsewhere,
+    # timing out after API_STARTUP_WAIT_SECONDS and exiting 1 → crash loop.
+    API_HEALTH_URL="${HINDSIGHT_API_HEALTH_URL:-http://localhost:${HINDSIGHT_API_PORT:-8888}/health}"
     API_STARTUP_WAIT_SECONDS="${HINDSIGHT_API_STARTUP_WAIT_SECONDS:-300}"
 
     # Run API directly - Python's PYTHONUNBUFFERED=1 handles output buffering
@@ -207,7 +210,7 @@ if [ "$ENABLE_CP" = "true" ]; then
     echo "   Control Plane: http://localhost:${HINDSIGHT_CP_PORT:-9999}"
 fi
 if [ "$ENABLE_API" = "true" ]; then
-    echo "   API:           http://localhost:8888"
+    echo "   API:           http://localhost:${HINDSIGHT_API_PORT:-8888}"
 fi
 echo ""
 

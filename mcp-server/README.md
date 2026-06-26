@@ -53,7 +53,7 @@ Add to `~/.claude/mcp.json`:
 **Halls** (knowledge types): fact, event, decision, preference, discovery, procedure, warning
 
 **Layers** (priority):
-- L0 — Identity (always loaded)
-- L1 — Critical facts (per-space)
-- L2 — Session context (default)
-- L3 — Deep memory (full search only)
+- L0 — Critical (always recalled)
+- L1 — Important (recalled by default)
+- L2 — Normal (default for new memories)
+- L3 — Archive (deep search only, compressed into closets)

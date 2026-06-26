@@ -77,6 +77,18 @@ docker compose -f docker-compose.mempalace.yml up -d
 
 API available at `http://localhost:5100`. Drop-in replacement for vanilla Hindsight — same API, same clients, new brain.
 
+### Embeddings
+
+Ships with `BAAI/bge-small-en-v1.5` (384-dim) — fast, CPU-friendly, baked into the image so first run needs no network download. It's **English-optimized**; recall quality on other languages degrades.
+
+For multilingual memory (e.g. RU, multi-script), point it at a multilingual model:
+
+```bash
+HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL=BAAI/bge-m3   # 1024-dim, multilingual
+```
+
+Dimension is detected automatically. ⚠️ Switching models changes the vector dimension — do it on an **empty** memory store, or wipe + re-embed, since existing vectors can't be mixed across dimensions.
+
 ## MCP Server
 
 The `mcp-server/` directory contains a standalone [MCP](https://modelcontextprotocol.io) server. Any MCP-compatible client (Claude Code, OpenClaw, Cursor, etc.) connects and gets structured long-term memory.
@@ -215,11 +227,11 @@ curl -X POST http://localhost:5100/bridge \
 
 ## What we changed
 
-11 patched files, 2 new modules, ~1000 lines total. Plus a standalone MCP server.
+A taxonomy layer over Hindsight's vector store, plus a standalone MCP server.
 
 Key additions:
 - `room_hall_classifier.py` — keyword-based taxonomy engine (new)
-- `aa1_add_room_hall_to_memory_units.py` — DB migration: flat → hierarchical (new)
+- `aa1_add_room_hall_to_memory_units.py` — DB migration: flat → hierarchical, adds room/hall + `layer` column (new)
 - `mcp-server/` — standalone MCP server with 5 tools (new)
 - Storage layer — room/hall/layer metadata on every write
 - Retrieval — room-scoped search with hall filtering

@@ -34,6 +34,11 @@ def upgrade() -> None:
     # Hall: knowledge type classification (what kind of knowledge)
     op.execute(f"ALTER TABLE {schema}memory_units ADD COLUMN IF NOT EXISTS hall TEXT")
 
+    # Layer: memory tier L0-L3 (ADR-145). Model declares server_default 'L2';
+    # this column was missing from the original migration while retrieval/models
+    # reference it, causing `column "layer" does not exist` on recall.
+    op.execute(f"ALTER TABLE {schema}memory_units ADD COLUMN IF NOT EXISTS layer TEXT DEFAULT 'L2'")
+
     # Indexes for filtering BEFORE semantic search
     op.execute(
         f"CREATE INDEX IF NOT EXISTS idx_memory_units_room "
@@ -47,10 +52,16 @@ def upgrade() -> None:
         f"CREATE INDEX IF NOT EXISTS idx_memory_units_room_hall "
         f"ON {schema}memory_units (bank_id, room, hall) WHERE room IS NOT NULL AND hall IS NOT NULL"
     )
+    op.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_memory_units_layer "
+        f"ON {schema}memory_units (bank_id, layer) WHERE layer IS NOT NULL"
+    )
 
 
 def downgrade() -> None:
     schema = _get_schema_prefix()
+    op.execute(f"DROP INDEX IF EXISTS {schema}idx_memory_units_layer")
+    op.execute(f"ALTER TABLE {schema}memory_units DROP COLUMN IF EXISTS layer")
     op.execute(f"DROP INDEX IF EXISTS {schema}idx_memory_units_room_hall")
     op.execute(f"DROP INDEX IF EXISTS {schema}idx_memory_units_hall")
     op.execute(f"DROP INDEX IF EXISTS {schema}idx_memory_units_room")

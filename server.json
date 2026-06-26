@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.holetron/hindsight-mempalace",
+  "title": "Hindsight MemPalace",
+  "description": "Self-hosted long-term memory for AI agents over MCP. Hierarchical recall (Rooms / Halls / Layers) backed by pgvector, with tools to retain, recall, reflect, compress into closets, and bridge across memory banks.",
+  "version": "1.0.0",
+  "websiteUrl": "https://github.com/holetron/hindsight-mempalace",
+  "repository": {
+    "url": "https://github.com/holetron/hindsight-mempalace",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "hindsight-mempalace-mcp",
+      "version": "1.0.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "HINDSIGHT_URL",
+          "description": "Base URL of the Hindsight API (self-hosted). Defaults to http://127.0.0.1:5100.",
+          "isRequired": false,
+          "default": "http://127.0.0.1:5100"
+        },
+        {
+          "name": "MEMPALACE_BANK",
+          "description": "Default memory bank ID for retain/recall.",
+          "isRequired": false,
+          "default": "mempalace-main"
+        }
+      ]
+    }
+  ]
+}

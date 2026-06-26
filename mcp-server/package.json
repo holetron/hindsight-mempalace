@@ -1,6 +1,7 @@
 {
   "name": "hindsight-mempalace-mcp",
   "version": "1.0.0",
+  "mcpName": "io.github.holetron/hindsight-mempalace",
   "description": "Standalone MCP server for Hindsight MemPalace — hierarchical AI memory with Rooms, Halls, Layers, Closets, and Tunnels",
   "type": "module",
   "main": "server.js",
